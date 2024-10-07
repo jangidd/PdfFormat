@@ -30,6 +30,10 @@ import autoTable from 'jspdf-autotable';
 import { Test } from "@jsonforms/core";
 import html2pdf from "html2pdf.js";
 import axios from "axios";
+import Pica from 'pica';
+import { PDFDocument } from 'pdf-lib';
+import pako from 'pako';
+import Compress from 'compress.js';
 
 import * as cornerstone from "cornerstone-core";
 import * as cornerstoneMath from "cornerstone-math";
@@ -473,6 +477,7 @@ class App extends Component {
   // These are all the functions that are common.
 
   // This will show the loader at the starting of the Report Generation Logic.
+
   showLoader = () => {
     console.log("Showing loader");
     const loader = document.querySelector(".loader");
@@ -673,20 +678,35 @@ class App extends Component {
     return currentYPosition;
   };
 
-  // Add separate image on the first page of both ECG and Xray.
-  addSeparateImage = async (pdf, reportImageUrl, currentYPosition) => {
+  // This is for adding the image on the single page of an pdf.
+  addReportImage = async (pdf, reportImageUrl, currentYPosition) => {
+    const A4_HEIGHT = 841.89; // A4 height in points (for "pt" unit used in jsPDF)
+
     if (reportImageUrl) {
         try {
-            const imageData = await this.fetchImageAsBase64(reportImageUrl);
+            const imageData = await fetchImageAsBase64(reportImageUrl);
             const pageWidth = pdf.internal.pageSize.width;
-            const imgWidth = pageWidth -20;
-            const imgHeight = 500;
-            // const imgX = (pageWidth - imgWidth) / 2;
-            const imgX = 20;
-            const imgY = 200;
+            const imgWidth = 300;
+            const imgHeight = 200;
+            const imgX = (pageWidth - imgWidth) / 2;
+            const imgY = currentYPosition;
 
-            pdf.addImage(imageData, "PNG", imgX, imgY, imgWidth, imgHeight);
-            currentYPosition = imgY + imgHeight + 20;
+            // Calculate the new Y position after adding the image
+            const newYPosition = imgY + imgHeight + 20;
+
+            // Check if the new Y position exceeds the A4 page height
+            if (newYPosition > A4_HEIGHT) {
+                // Add a new page to the PDF
+                pdf.addPage();
+                // Reset currentYPosition for the new page
+                currentYPosition = 40; // Start at a margin from the top of the new page
+            }
+
+            // Add the image
+            pdf.addImage(imageData, "PNG", imgX, currentYPosition, imgWidth, imgHeight);
+
+            // Update currentYPosition for the next content
+            currentYPosition = imgY + imgHeight + 20; // Update the position for the next content
             return currentYPosition;
         } catch (error) {
             console.error("Error adding image to PDF:", error);
@@ -698,6 +718,232 @@ class App extends Component {
     return currentYPosition;
   };
 
+
+  // Add this part in the try part of the addSeparateImage and this will be all for adding the image on the page.
+  // in center in portrait mode i.e. leaving some space from top and bottom and then giving the image on the pdf.
+
+  // const imageData = await this.fetchImageAsBase64(reportImageUrl);
+  // const pageWidth = pdf.internal.pageSize.width;
+  // const pageHeight = pdf.internal.pageSize.height;
+
+  // // Set margins
+  // const margin = 20; // Margin from each side
+  // const imgWidth = pageWidth - 2 * margin; // Width minus margins
+  // const imgHeight = 400;
+
+  // const imgX = margin; // Start X position with margin
+  // const imgY = (pageHeight - imgHeight) / 2; // Center vertically
+
+  // pdf.addImage(imageData, "PNG", imgX, imgY, imgWidth, imgHeight);
+  // currentYPosition = imgY + imgHeight + 20; // Update position if needed
+  // return currentYPosition;
+
+  addSeparateImageOnEcg = async (pdf, reportImageUrl, currentYPosition) => {
+    if (reportImageUrl) {
+        try {
+            // Fetch the image from the URL
+            const response = await fetch(reportImageUrl);
+            const blob = await response.blob();
+            const img = new Image();
+            img.src = URL.createObjectURL(blob);
+
+            // Wait for the image to load
+            await new Promise((resolve) => {
+                img.onload = resolve;
+            });
+
+            // Create a canvas for the original image
+            const originalCanvas = document.createElement('canvas');
+            originalCanvas.width = img.width;
+            originalCanvas.height = img.height;
+            const originalCtx = originalCanvas.getContext('2d');
+            originalCtx.drawImage(img, 0, 0);
+
+            // Create a canvas for the resized image
+            const resizedCanvas = document.createElement('canvas');
+            const pica = new Pica();
+            const targetWidth = Math.min(800, img.width);
+            const targetHeight = Math.min(600, img.height);
+            resizedCanvas.width = targetWidth;
+            resizedCanvas.height = targetHeight;
+
+            // Resize the image using Pica
+            await pica.resize(originalCanvas, resizedCanvas);
+
+            // Convert resized image to Blob with lower quality
+            const resizedImageData = await new Promise((resolve) => {
+                resizedCanvas.toBlob((blob) => {
+                    const newImg = new Image();
+                    newImg.src = URL.createObjectURL(blob);
+                    newImg.onload = () => {
+                        resolve(newImg.src);
+                    };
+                }, 'image/jpeg', 0.5); // Change to 'image/jpeg' and reduce quality
+            });
+
+            // Create a canvas to rotate the image
+            const rotationCanvas = document.createElement('canvas');
+            const rotationCtx = rotationCanvas.getContext('2d');
+            rotationCanvas.width = resizedCanvas.height;
+            rotationCanvas.height = resizedCanvas.width;
+
+            rotationCtx.translate(rotationCanvas.width / 2, rotationCanvas.height / 2);
+            rotationCtx.rotate(Math.PI / 2);
+            rotationCtx.drawImage(resizedCanvas, -resizedCanvas.width / 2, -resizedCanvas.height / 2);
+
+            const canvasImageData = rotationCanvas.toDataURL('image/jpeg', 0.7); // Use JPEG for better compression
+
+            // Calculate margins and dimensions for the PDF
+            const pageWidth = pdf.internal.pageSize.width;
+            const pageHeight = pdf.internal.pageSize.height;
+            const margin = 20;
+
+            const aspectRatio = rotationCanvas.width / rotationCanvas.height;
+            let pdfImgWidth = pageWidth - 2 * margin;
+            let pdfImgHeight = pdfImgWidth / aspectRatio;
+
+            if (pdfImgHeight > pageHeight - 2 * margin) {
+                pdfImgHeight = pageHeight - 2 * margin;
+                pdfImgWidth = pdfImgHeight * aspectRatio;
+            }
+
+            const imgX = (pageWidth - pdfImgWidth) / 2;
+            const imgY = (pageHeight - pdfImgHeight) / 2;
+
+            pdf.addImage(canvasImageData, 'JPEG', imgX, imgY, pdfImgWidth, pdfImgHeight);
+
+            return currentYPosition;
+        } catch (error) {
+            console.error('Error adding image to PDF:', error);
+            this.hideLoader();
+            this.showNotification('Error processing image. Please try again.');
+            throw error;
+        }
+    }
+    return currentYPosition;
+  };
+
+
+  // Add separate image on the first page of ECG Report .
+  // addSeparateImageOnEcg = async (pdf, reportImageUrl, currentYPosition) => {
+  //   if (reportImageUrl) {
+  //       try {
+  //           // Fetch the image from the URL
+  //           const response = await fetch(reportImageUrl);
+  //           const blob = await response.blob(); // Convert response to Blob
+  //           const img = new Image();
+  //           img.src = URL.createObjectURL(blob);
+
+  //           // Wait for the image to load
+  //           await new Promise((resolve) => {
+  //               img.onload = resolve;
+  //           });
+
+  //           // Create a canvas to resize the image
+  //           const originalCanvas = document.createElement('canvas');
+  //           const originalCtx = originalCanvas.getContext('2d');
+  //           originalCanvas.width = img.width;
+  //           originalCanvas.height = img.height;
+  //           originalCtx.drawImage(img, 0, 0);
+
+  //           // Create a canvas for the resized image
+  //           const resizedCanvas = document.createElement('canvas');
+  //           const pica = new Pica();
+  //           const targetWidth = Math.min(800, img.width); // Set target width
+  //           const targetHeight = Math.min(600, img.height); // Set target height
+  //           resizedCanvas.width = targetWidth;
+  //           resizedCanvas.height = targetHeight;
+
+  //           // Resize the image
+  //           await pica.resize(originalCanvas, resizedCanvas);
+
+  //           // Get the resized image data
+  //           const resizedImageData = await new Promise((resolve) => {
+  //               resizedCanvas.toBlob((blob) => {
+  //                   const newImg = new Image();
+  //                   newImg.src = URL.createObjectURL(blob);
+  //                   newImg.onload = () => {
+  //                       resolve(newImg.src);
+  //                   };
+  //               }, 'image/png', 0.7); // Adjust the quality as needed
+  //           });
+
+  //           // Create a canvas to rotate the image
+  //           const rotationCanvas = document.createElement('canvas');
+  //           const rotationCtx = rotationCanvas.getContext('2d');
+  //           rotationCanvas.width = resizedCanvas.height; // Swap dimensions for rotation
+  //           rotationCanvas.height = resizedCanvas.width; // Swap dimensions for rotation
+
+  //           // Translate to the center of the canvas, rotate, and draw
+  //           rotationCtx.translate(rotationCanvas.width / 2, rotationCanvas.height / 2);
+  //           rotationCtx.rotate(Math.PI / 2); // Rotate 90 degrees
+  //           rotationCtx.drawImage(resizedCanvas, -resizedCanvas.width / 2, -resizedCanvas.height / 2);
+
+  //           // Get the rotated image data
+  //           const canvasImageData = rotationCanvas.toDataURL('image/png', 0.7); // Adjust the quality as needed
+
+  //           // Calculate margins and dimensions for the PDF
+  //           const pageWidth = pdf.internal.pageSize.width;
+  //           const pageHeight = pdf.internal.pageSize.height;
+  //           const margin = 20;
+
+  //           // Maintain the aspect ratio of the image
+  //           const aspectRatio = rotationCanvas.width / rotationCanvas.height;
+  //           let pdfImgWidth = pageWidth - 2 * margin;
+  //           let pdfImgHeight = pdfImgWidth / aspectRatio;
+
+  //           // If the height exceeds pageHeight minus margins, adjust
+  //           if (pdfImgHeight > pageHeight - 2 * margin) {
+  //               pdfImgHeight = pageHeight - 2 * margin;
+  //               pdfImgWidth = pdfImgHeight * aspectRatio;
+  //           }
+
+  //           // Center the image within the margins
+  //           const imgX = (pageWidth - pdfImgWidth) / 2;
+  //           const imgY = (pageHeight - pdfImgHeight) / 2;
+
+  //           // Add the image to the PDF
+  //           pdf.addImage(canvasImageData, 'PNG', imgX, imgY, pdfImgWidth, pdfImgHeight);
+
+  //           return currentYPosition;
+  //       } catch (error) {
+  //           console.error('Error adding image to PDF:', error);
+  //           this.hideLoader();
+  //           this.showNotification('Error processing image. Please try again.');
+  //           throw error;
+  //       }
+  //   }
+  //   return currentYPosition;
+  // };
+
+    // Add separate image on the first page of both ECG and Xray.
+    addSeparateImageOnXray = async (pdf, reportImageUrl, currentYPosition) => {
+      if (reportImageUrl) {
+          try {
+              const imageData = await this.fetchImageAsBase64(reportImageUrl);
+              const pageWidth = pdf.internal.pageSize.width;
+              const pageHeight = pdf.internal.pageSize.height;
+
+              // Set margins
+              const margin = 20; // Margin from each side
+              const imgWidth = pageWidth - 2 * margin; // Width minus margins
+              const imgHeight = 400;
+
+              const imgX = margin; // Start X position with margin
+              const imgY = (pageHeight - imgHeight) / 2; // Center vertically
+
+              pdf.addImage(imageData, "PNG", imgX, imgY, imgWidth, imgHeight);
+              currentYPosition = imgY + imgHeight + 20; // Update position if needed
+              return currentYPosition;
+          } catch (error) {
+              console.error('Error adding image to PDF:', error);
+              this.hideLoader();
+              this.showNotification('Error processing image. Please try again.');
+              throw error;
+          }
+      }
+      return currentYPosition;
+    };
 
 
   // End of all the common functions for the reporting bot.
@@ -791,330 +1037,713 @@ class App extends Component {
 
   ///////////////////////////////// Download PDF without Image /////////////////////////////
   GetDivContentOnPDFWithoutImage() {
-    const showLoader = () => {
-      console.log("Showing loader");
-      const loader = document.querySelector(".loader");
-      if (loader) {
-        loader.style.display = "block";
+    // const showLoader = () => {
+    //   console.log("Showing loader");
+    //   const loader = document.querySelector(".loader");
+    //   if (loader) {
+    //     loader.style.display = "block";
+    //   }
+    // };
+
+    // const hideLoader = () => {
+    //   console.log("Hiding loader");
+    //   const loader = document.querySelector(".loader");
+    //   if (loader) {
+    //     loader.style.display = "none";
+    //   }
+    // };
+    // // Show the loader before starting the PDF generation
+    // showLoader();
+    // var filename = this.createFilename();
+    // const data = document.getElementsByClassName("ck-editor__editable")[0];
+    // const table = data.querySelector("table");
+    // data.classList.add("ck-blurred");
+    // data.classList.remove("ck-focused");
+    // const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+    // // Remove the last image element from the capture
+    // const images = data.querySelectorAll("img");
+    // if (images.length > 0) {
+    //   const lastImage = images[images.length - 1];
+    //   lastImage.style.display = "none"; // Hide the last image
+    // }
+
+    // if (data != undefined) {
+    //   var a4Width = 595.28; // A4 width in points (1 point = 1/72 inch)
+    //   var a4Height = 841.89; // A4 height in points
+
+    //   var canvasWidth = a4Width - 40; // Adjusted width to leave some margin
+
+    //   html2canvas(data, {
+    //     scale: 4, // Adjust the scale if needed for better quality
+    //     windowWidth: document.body.scrollWidth,
+    //     windowHeight: document.body.scrollHeight,
+    //   }).then(async (canvas) => {
+    //     const imgData = canvas.toDataURL("image/png", 1.0);
+
+    //     // Calculate the height based on the aspect ratio of the captured image
+    //     const canvasHeight = (canvasWidth / canvas.width) * canvas.height;
+
+    //     // Show the last image again
+    //     if (images.length > 0) {
+    //       const lastImage = images[images.length - 1];
+    //       lastImage.style.display = "block";
+    //     }
+
+    //     // Hide the loader when the PDF is ready
+    //     hideLoader();
+
+    //     // Create PDF with only the captured content
+    //     const pdf = new jsPDF("p", "pt", [a4Width, a4Height], true);
+    //     pdf.addImage(imgData, "PNG", 20, 20, canvasWidth, canvasHeight);
+
+    //     pdf.setTextColor(255, 255, 255);
+
+    //     // Calculate the position to place the text at the bottom
+    //     const textX = 40;
+    //     const textY = 841.89 - 2; // 20 points from the bottom
+
+    //     // If a table exists within the ck-editor__editable div, capture its text content
+    //     if (table) {
+    //       const tableText = table.textContent || "";
+
+    //       // Add the table text as text (preserve original formatting)
+    //       pdf.setFontSize(2); // Adjust the font size as needed
+    //       pdf.text(textX, textY, tableText);
+    //     }
+
+    //     // Iterate through all paragraphs in the ck-editor__editable div
+    //     const paragraphs = data.querySelectorAll("p");
+    //     paragraphs.forEach((paragraph) => {
+    //       const paragraphText = paragraph.textContent || "";
+
+    //       // Add each paragraph text as text (preserve original formatting)
+    //       pdf.setFontSize(2); // Adjust the font size as needed
+    //       pdf.text(textX, textY - 2, paragraphText); // Place it above the table text
+    //     });
+
+    //     // Save the PDF
+    //     pdf.save(filename ? filename + ".pdf" : "download.pdf");
+
+    //     // Redirect to the previous page after a short delay
+    //     await delay(200);
+    //     window.location.reload(true);
+    //   });
+    // }
+
+    (async () => {
+      this.showLoader();
+      const filename = this.createFilename();
+      const data = document.getElementsByClassName("ck-editor__editable")[0];
+      
+      const images = data.querySelectorAll("img");
+      const signatureElement = images[1];
+      const signatureUrl = signatureElement ? signatureElement.src : null;
+      const logoElement = images[0];
+      const logoUrl = logoElement ? logoElement.src : null;
+      console.log("This is the signature Url:", signatureUrl);
+      console.log("This is the logo Url:", logoUrl);
+
+      const { patientId, patientName, age, gender, testDate, reportDate, location, accession, reportImageUrl } = this.extractDataFromURL();
+
+      const pdf = new jsPDF("p", "pt", "a4");
+
+      let currentYPosition = 40;
+
+      try {
+          currentYPosition = await this.addLogo(pdf, logoUrl, currentYPosition);
+
+          const tableData = [
+              ["Patient Name:", patientName || "N/A", "Patient ID:", patientId || "N/A"],
+              ["Patient Age:", age || "N/A", "Patient Gender:", gender || "N/A"],
+              ["Test Date:", testDate || "N/A", "Report Date:", reportDate || "N/A"]
+          ];
+
+          currentYPosition += 20;
+
+          pdf.autoTable({
+              startY: currentYPosition,
+              body: tableData,
+              theme: 'grid',
+              styles: {
+                  cellPadding: 3,
+                  fontSize: 10,
+              },
+          });
+          currentYPosition = pdf.previousAutoTable.finalY + 20;
+
+          const paragraphs = data.querySelectorAll("p");
+          const columnWidth = (pdf.internal.pageSize.width - 80) / 2; // 80 = 40px margin on each side
+          let isLeftColumn = true; // Start with left column
+          let leftColumnY = 0;
+          let rightColumnY = 0;
+          const marginX = 40; // Margin from left side
+          const columnGap = 10; // Gap between columns
+          const bullet = "\u2022 ";
+          // For fixing the ckeditor problem i am using this logic - Himanshu.
+          const observationArray = [];
+          console.log("This is the complete fetched paragraph tag from ckeditor:");
+          console.log(paragraphs)
+          console.log("End of the paragraphs tag.")
+          
+
+          for (const paragraph of paragraphs) {
+              const paragraphText = paragraph.textContent || "";
+              console.log("These is the paragraph text :", paragraphText);
+
+              pdf.setFontSize(12);
+              pdf.setFont("helvetica", "bold");
+
+              if (paragraphText.includes("OBSERVATIONS:")) {
+                  pdf.text(paragraphText, marginX, currentYPosition);
+                  pdf.setFontSize(13);
+                  pdf.setFont("helvetica", "normal");
+                  currentYPosition += 20;
+              } else if (paragraphText.includes("IMPRESSION:")) {
+                  // Adding the logic to add the observation lines just before the Impression line.
+                  // setting the font size and the font family back to normal.
+                  pdf.setFontSize(12); 
+                  pdf.setFont("helvetica", "normal");
+                  const totallines = observationArray.length;
+                  const halflines = Math.ceil(totallines / 2);
+                  console.log("This is the observation array :", observationArray);
+
+                  // Adding the bullet point to the lines before printing them  on the pdf.
+                  const addBulletPoint = (line) => {
+                    if (line.startsWith(bullet)) {
+                        return line;
+                    }
+                    return bullet + line;
+                  };
+
+                  // setting the left column and right column logic (left one is not needed, i can optimise it later.)
+                  rightColumnY = currentYPosition;
+                  leftColumnY = currentYPosition;
+
+                  // Processing the texts which will fix the line text width greater than the column width issue.
+                  const processTextColumn = (text, x, y, columnWidth) => {
+                    let currentY = y;
+                    const textWidth = pdf.getTextWidth(text);
+                    const maxWidth = columnWidth - 20; // Padding for each column
+                    console.log("This is the current y (at the beginning of processing the new line of array ) :", currentY);
+                    console.log("This is the textWidth :", textWidth);
+                    console.log("This is the maxwidth :", maxWidth);
+            
+                    if (textWidth > maxWidth) {
+                      let remainingText = text;
+                      pdf.setFont("helvetica", "normal");
+                      let currentLine = '';
+                  
+                      // Split text into words
+                      const words = remainingText.split(' ');
+                  
+                      for (const word of words) {
+                          // Construct a test line with the next word
+                          const testLine = currentLine.length > 0 ? currentLine + ' ' + word : word;
+                          console.log("This is the testline :", testLine);
+                          const testLineWidth = pdf.getTextWidth(testLine);
+                  
+                          if (testLineWidth > maxWidth) {
+                              // If it exceeds the width, print the current line
+                              if (currentLine.length > 0) {
+                                  console.log("if the current line is greater than the maxwidth and is having some data:");
+                                  console.log("This is the current line", currentLine);
+                                  pdf.text(currentLine, x, currentY);
+                                  currentY += 15; // Move down for the next line
+                                  console.log("This is the current y :", currentY);
+                              }
+                              // Start a new line with the current word
+                              currentLine = "  " + word; // Reset current line to the word that caused overflow
+                              console.log("This is the remaining word or sentence added with a space here :", currentLine);
+                              
+                          } else {
+                              // If it fits, update the current line
+                              currentLine = testLine;
+                          }
+                      }
+                  
+                      // Print any remaining text in currentLine
+                      if (currentLine.length > 0) {
+                          pdf.text(currentLine, x, currentY);
+                          console.log("Printing any current line if left :", currentLine);
+                          console.log("This is the current y updated on the remaining text code :", currentY);
+                      }
+                    } else {
+                        pdf.text(text, x, currentY);
+                        console.log("Adding the text directly because it doesn't need separation :", text);
+                        console.log("the current y for directly added text:", currentY);
+                    }
+
+                    console.log("This is the current Y before just coming out of the process (return currenty +15) :", currentY);
+                    
+                    return currentY + 15;
+                  
+                  };
+
+                  // Adding the lines to the respective side along with the bullet points. 
+                  for (let i = 0; i < totallines; i++) {
+                    const lineWithBullet = addBulletPoint(observationArray[i]);
+                    console.log("These are the observation array lines given one by one :");
+                    console.log(lineWithBullet);
+                    console.log("End of the observation array separated lines.");
+                    if (i < halflines) {
+                        leftColumnY = processTextColumn(lineWithBullet, marginX, leftColumnY, columnWidth);
+                    } else {
+                        rightColumnY = processTextColumn(lineWithBullet, marginX + columnWidth + columnGap, rightColumnY, columnWidth);
+                    }
+                  }
+                  currentYPosition = Math.max(leftColumnY, rightColumnY);
+                  console.log("This is the right Column y :", rightColumnY);
+                  console.log("This is the left column y :", leftColumnY);
+                  console.log("This is the current y position :", currentYPosition);
+                  // End of the observation text's logic.
+                  currentYPosition += 20;
+                  pdf.setFontSize(13);
+                  pdf.setFont("helvetica", "bold");
+                  pdf.text(paragraphText, marginX, currentYPosition);
+                  pdf.setFontSize(10);
+                  pdf.setFont("helvetica", "normal");
+                  currentYPosition += 20;
+              } else if (paragraphText.includes("Dr.")) {
+                  currentYPosition = await this.addSignature(pdf, signatureUrl, currentYPosition);
+                  pdf.setFontSize(12);
+                  pdf.setFont("helvetica", "normal");
+                  const drdatalines = paragraphText.split(',').map(line => line.trim()).filter(line => line.length > 0);
+                  for (const drdata of drdatalines){
+                    pdf.text(drdata, marginX, currentYPosition);
+                    currentYPosition += 15;
+                  }
+                  currentYPosition += 10;
+              } else if (paragraphText.includes("X-RAY")) {
+                  pdf.setFontSize(13);
+                  pdf.setFont("helvetica", "bold");
+                  pdf.text(paragraphText, marginX, currentYPosition);
+                  currentYPosition += 20;
+              } else if (paragraphText.includes(bullet)) {
+                  pdf.setFontSize(12);
+                  pdf.setFont("helvetica", "bold");
+                  const impressionlines = paragraphText.split('.').map(line => line.trim()).filter(line => line.length > 0);
+                  for (const line of impressionlines) {
+                    pdf.text(line, marginX, currentYPosition);
+                  }
+                  currentYPosition += 20;
+              } else {
+                // Handle text in columnar structure
+                const lines = paragraphText.split('.').map(line => line.trim()).filter(line => line.length > 0);
+                console.log("These are the lines of the observation :")
+                console.log(lines)
+                console.log("End of lines of the observation.")
+                // Adding the observation text in the array. 
+                for (const observationtext of lines){
+                  observationArray.push(observationtext);
+                }
+                // End of the observation text logic.
+                
+            }
+          }              
+
+          // This is to download the file on the same browser.
+          pdf.save(filename ? filename + ".pdf" : "download.pdf");
+
+          const currentURL = window.location.href;
+
+          setTimeout(() => {
+              window.location.href = document.referrer + "?nocache=" + Date.now();
+          }, 200);
+
+          window.addEventListener("popstate", () => {
+              if (window.location.href !== currentURL) {
+                  setTimeout(() => {
+                      window.location.reload(true);
+                  }, 200);
+              }
+          });
+
+      } catch (error) {
+          console.error("Error generating PDF:", error);
+          this.showNotification("Error generating PDF. Please try again.");
+      } finally {
+          this.hideLoader();
       }
-    };
-
-    const hideLoader = () => {
-      console.log("Hiding loader");
-      const loader = document.querySelector(".loader");
-      if (loader) {
-        loader.style.display = "none";
-      }
-    };
-    // Show the loader before starting the PDF generation
-    showLoader();
-    var filename = this.createFilename();
-    const data = document.getElementsByClassName("ck-editor__editable")[0];
-    const table = data.querySelector("table");
-    data.classList.add("ck-blurred");
-    data.classList.remove("ck-focused");
-    const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-    // Remove the last image element from the capture
-    const images = data.querySelectorAll("img");
-    if (images.length > 0) {
-      const lastImage = images[images.length - 1];
-      lastImage.style.display = "none"; // Hide the last image
-    }
-
-    if (data != undefined) {
-      var a4Width = 595.28; // A4 width in points (1 point = 1/72 inch)
-      var a4Height = 841.89; // A4 height in points
-
-      var canvasWidth = a4Width - 40; // Adjusted width to leave some margin
-
-      html2canvas(data, {
-        scale: 4, // Adjust the scale if needed for better quality
-        windowWidth: document.body.scrollWidth,
-        windowHeight: document.body.scrollHeight,
-      }).then(async (canvas) => {
-        const imgData = canvas.toDataURL("image/png", 1.0);
-
-        // Calculate the height based on the aspect ratio of the captured image
-        const canvasHeight = (canvasWidth / canvas.width) * canvas.height;
-
-        // Show the last image again
-        if (images.length > 0) {
-          const lastImage = images[images.length - 1];
-          lastImage.style.display = "block";
-        }
-
-        // Hide the loader when the PDF is ready
-        hideLoader();
-
-        // Create PDF with only the captured content
-        const pdf = new jsPDF("p", "pt", [a4Width, a4Height], true);
-        pdf.addImage(imgData, "PNG", 20, 20, canvasWidth, canvasHeight);
-
-        pdf.setTextColor(255, 255, 255);
-
-        // Calculate the position to place the text at the bottom
-        const textX = 40;
-        const textY = 841.89 - 2; // 20 points from the bottom
-
-        // If a table exists within the ck-editor__editable div, capture its text content
-        if (table) {
-          const tableText = table.textContent || "";
-
-          // Add the table text as text (preserve original formatting)
-          pdf.setFontSize(2); // Adjust the font size as needed
-          pdf.text(textX, textY, tableText);
-        }
-
-        // Iterate through all paragraphs in the ck-editor__editable div
-        const paragraphs = data.querySelectorAll("p");
-        paragraphs.forEach((paragraph) => {
-          const paragraphText = paragraph.textContent || "";
-
-          // Add each paragraph text as text (preserve original formatting)
-          pdf.setFontSize(2); // Adjust the font size as needed
-          pdf.text(textX, textY - 2, paragraphText); // Place it above the table text
-        });
-
-        // Save the PDF
-        pdf.save(filename ? filename + ".pdf" : "download.pdf");
-
-        // Redirect to the previous page after a short delay
-        await delay(200);
-        window.location.reload(true);
-      });
-    }
+  })();
   }
 
   ////////////////////////////////// Another one upgraded on 05/01/2024 ////////////////////////
   GetDivContentOnPDF() {
-    const showLoader = () => {
-      console.log("Showing loader");
-      const loader = document.querySelector(".loader");
-      if (loader) {
-        loader.style.display = "block";
+
+    (async () => {
+      this.showLoader();
+      const filename = this.createFilename();
+      const data = document.getElementsByClassName("ck-editor__editable")[0];
+      
+      const images = data.querySelectorAll("img");
+      const signatureElement = images[1];
+      const signatureUrl = signatureElement ? signatureElement.src : null;
+      const logoElement = images[0];
+      const logoUrl = logoElement ? logoElement.src : null;
+      console.log("This is the signature Url:", signatureUrl);
+      console.log("This is the logo Url:", logoUrl);
+
+      const { patientId, patientName, age, gender, testDate, reportDate, location, accession, reportImageUrl } = extractDataFromURL();
+
+      const pdf = new jsPDF("p", "pt", "a4");
+
+      let currentYPosition = 40;
+
+      try {
+          currentYPosition = await this.addLogo(pdf, logoUrl, currentYPosition);
+
+          const tableData = [
+              ["Patient Name:", patientName || "N/A", "Patient ID:", patientId || "N/A"],
+              ["Patient Age:", age || "N/A", "Patient Gender:", gender || "N/A"],
+              ["Test Date:", testDate || "N/A", "Report Date:", reportDate || "N/A"]
+          ];
+
+          currentYPosition += 20;
+
+          pdf.autoTable({
+              startY: currentYPosition,
+              body: tableData,
+              theme: 'grid',
+              styles: {
+                  cellPadding: 3,
+                  fontSize: 10,
+              },
+          });
+          currentYPosition = pdf.previousAutoTable.finalY + 20;
+
+          const paragraphs = data.querySelectorAll("p");
+          const columnWidth = (pdf.internal.pageSize.width - 80) / 2; // 80 = 40px margin on each side
+          let isLeftColumn = true; // Start with left column
+          let leftColumnY = 0;
+          let rightColumnY = 0;
+          const marginX = 40; // Margin from left side
+          const columnGap = 10; // Gap between columns
+          const bullet = "\u2022 ";
+          // For fixing the ckeditor problem i am using this logic - Himanshu.
+          const observationArray = [];
+          console.log("This is the complete fetched paragraph tag from ckeditor:");
+          console.log(paragraphs)
+          console.log("End of the paragraphs tag.")
+          
+
+          for (const paragraph of paragraphs) {
+              const paragraphText = paragraph.textContent || "";
+              console.log("These is the paragraph text :", paragraphText);
+
+              pdf.setFontSize(12);
+              pdf.setFont("helvetica", "bold");
+
+              if (paragraphText.includes("OBSERVATIONS:")) {
+                  pdf.text(paragraphText, marginX, currentYPosition);
+                  pdf.setFontSize(13);
+                  pdf.setFont("helvetica", "normal");
+                  currentYPosition += 20;
+              } else if (paragraphText.includes("IMPRESSION:")) {
+                  // Adding the logic if the lines are lesser than 6 than they will get printed in the normal manner.
+                  if (observationArray.length > 5){
+                    // Adding the logic to add the observation lines just before the Impression line.
+                    // setting the font size and the font family back to normal.
+                    pdf.setFontSize(12); 
+                    pdf.setFont("helvetica", "normal");
+                    const totallines = observationArray.length;
+                    const halflines = Math.ceil(totallines / 2);
+                    console.log("This is the observation array :", observationArray);
+
+                    // Adding the bullet point to the lines before printing them  on the pdf.
+                    const addBulletPoint = (line) => {
+                      if (line.startsWith(bullet)) {
+                          return line;
+                      }
+                      return bullet + line;
+                    };
+
+                    // setting the left column and right column logic (left one is not needed, i can optimise it later.)
+                    rightColumnY = currentYPosition;
+                    leftColumnY = currentYPosition;
+
+                    // Processing the texts which will fix the line text width greater than the column width issue.
+                    const processTextColumn = (text, x, y, columnWidth) => {
+                      let currentY = y;
+                      const textWidth = pdf.getTextWidth(text);
+                      const maxWidth = columnWidth - 20; // Padding for each column
+                      console.log("This is the current y (at the beginning of processing the new line of array ) :", currentY);
+                      console.log("This is the textWidth :", textWidth);
+                      console.log("This is the maxwidth :", maxWidth);
+              
+                      if (textWidth > maxWidth) {
+                        let remainingText = text;
+                        pdf.setFont("helvetica", "normal");
+                        let currentLine = '';
+                    
+                        // Split text into words
+                        const words = remainingText.split(' ');
+                    
+                        for (const word of words) {
+                            // Construct a test line with the next word
+                            const testLine = currentLine.length > 0 ? currentLine + ' ' + word : word;
+                            console.log("This is the testline :", testLine);
+                            const testLineWidth = pdf.getTextWidth(testLine);
+                    
+                            if (testLineWidth > maxWidth) {
+                                // If it exceeds the width, print the current line
+                                if (currentLine.length > 0) {
+                                    console.log("if the current line is greater than the maxwidth and is having some data:");
+                                    console.log("This is the current line", currentLine);
+                                    pdf.text(currentLine, x, currentY);
+                                    currentY += 15; // Move down for the next line
+                                    console.log("This is the current y :", currentY);
+                                }
+                                // Start a new line with the current word
+                                currentLine = "  " + word; // Reset current line to the word that caused overflow
+                                console.log("This is the remaining word or sentence added with a space here :", currentLine);
+                                
+                            } else {
+                                // If it fits, update the current line
+                                currentLine = testLine;
+                            }
+                        }
+                    
+                        // Print any remaining text in currentLine
+                        if (currentLine.length > 0) {
+                            pdf.text(currentLine, x, currentY);
+                            console.log("Printing any current line if left :", currentLine);
+                            console.log("This is the current y updated on the remaining text code :", currentY);
+                        }
+                      } else {
+                          pdf.text(text, x, currentY);
+                          console.log("Adding the text directly because it doesn't need separation :", text);
+                          console.log("the current y for directly added text:", currentY);
+                      }
+
+                      console.log("This is the current Y before just coming out of the process (return currenty +15) :", currentY);
+                      
+                      return currentY + 15;
+                    
+                    };
+
+                    // Adding the lines to the respective side along with the bullet points. 
+                    for (let i = 0; i < totallines; i++) {
+                      const lineWithBullet = addBulletPoint(observationArray[i]);
+                      console.log("These are the observation array lines given one by one :");
+                      console.log(lineWithBullet);
+                      console.log("End of the observation array separated lines.");
+                      if (i < halflines) {
+                          leftColumnY = processTextColumn(lineWithBullet, marginX, leftColumnY, columnWidth);
+                      } else {
+                          rightColumnY = processTextColumn(lineWithBullet, marginX + columnWidth + columnGap, rightColumnY, columnWidth);
+                      }
+                    }
+                    currentYPosition = Math.max(leftColumnY, rightColumnY);
+                    console.log("This is the right Column y :", rightColumnY);
+                    console.log("This is the left column y :", leftColumnY);
+                    console.log("This is the current y position :", currentYPosition);
+                  } else {
+
+                    // Adding the bullet point.
+                    const addBulletPoint = (line) => {
+                      if (line.startsWith(bullet)) {
+                          return line;
+                      }
+                      return bullet + line;
+                    };
+
+                    // Now adding the texts in normal manner.
+                    for (const line of observationArray){
+                      const lineWithBullet = addBulletPoint(line);
+                      pdf.text(lineWithBullet, marginX, currentYPosition);
+                      currentYPosition += 15;
+                    }
+
+                  }
+                  
+                  // End of the observation text's logic.
+                  currentYPosition += 20;
+                  pdf.setFontSize(13);
+                  pdf.setFont("helvetica", "bold");
+                  pdf.text(paragraphText, marginX, currentYPosition);
+                  pdf.setFontSize(10);
+                  pdf.setFont("helvetica", "normal");
+                  currentYPosition += 20;
+              } else if (paragraphText.includes("Dr.")) {
+                  currentYPosition = await this.addSignature(pdf, signatureUrl, currentYPosition);
+                  pdf.setFontSize(12);
+                  pdf.setFont("helvetica", "normal");
+                  const drdatalines = paragraphText.split(',').map(line => line.trim()).filter(line => line.length > 0);
+                  for (const drdata of drdatalines){
+                    pdf.text(drdata, marginX, currentYPosition);
+                    currentYPosition += 15;
+                  }
+                  currentYPosition += 10;
+              } else if (paragraphText.includes("X-RAY")) {
+                  pdf.setFontSize(13);
+                  pdf.setFont("helvetica", "bold");
+                  pdf.text(paragraphText, marginX, currentYPosition);
+                  currentYPosition += 20;
+              } else if (paragraphText.includes(bullet)) {
+                  pdf.setFontSize(12);
+                  pdf.setFont("helvetica", "bold");
+                  const impressionlines = paragraphText.split('.').map(line => line.trim()).filter(line => line.length > 0);
+                  for (const line of impressionlines) {
+                    pdf.text(line, marginX, currentYPosition);
+                  }
+                  currentYPosition += 20;
+              } else {
+                // Handle text in columnar structure
+                const lines = paragraphText.split('.').map(line => line.trim()).filter(line => line.length > 0);
+                console.log("These are the lines of the observation :")
+                console.log(lines)
+                console.log("End of lines of the observation.")
+                // Adding the observation text in the array. 
+                for (const observationtext of lines){
+                  observationArray.push(observationtext);
+                }
+                // End of the observation text logic.
+                
+            }
+          }              
+
+          currentYPosition = await this.addReportImage(pdf, reportImageUrl, currentYPosition);
+
+          // This is to download the file on the same browser.
+          pdf.save(filename ? filename + ".pdf" : "download.pdf");
+
+          const currentURL = window.location.href;
+
+          setTimeout(() => {
+              window.location.href = document.referrer + "?nocache=" + Date.now();
+          }, 200);
+
+          window.addEventListener("popstate", () => {
+              if (window.location.href !== currentURL) {
+                  setTimeout(() => {
+                      window.location.reload(true);
+                  }, 200);
+              }
+          });
+
+      } catch (error) {
+          console.error("Error generating PDF:", error);
+          this.showNotification("Error generating PDF. Please try again.");
+      } finally {
+          this.hideLoader();
       }
-    };
-
-    const hideLoader = () => {
-      console.log("Hiding loader");
-      const loader = document.querySelector(".loader");
-      if (loader) {
-        loader.style.display = "none";
-      }
-    };
-    // Show the loader before starting the PDF generation
-    showLoader();
-    var filename = this.createFilename();
-    const data = document.getElementsByClassName("ck-editor__editable")[0];
-    const table = data.querySelector("table");
-    data.classList.add("ck-blurred");
-    data.classList.remove("ck-focused");
-    const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-    if (data != undefined) {
-      // Create a new jsPDF instance
-      const pdf = new jsPDF("p", "pt", [595.28, 841.89], true); // A4 dimensions
-
-      // Capture the entire content, including text and images
-      html2canvas(data, {
-        scale: 2, // Adjust the scale if needed for better image quality
-        useCORS: true, // Added to address potential CORS issues
-      }).then(async (canvas) => {
-        const imgData = canvas.toDataURL("image/png", 1.0);
-
-        // Calculate the position to center the image
-        const imgWidth = 595.28 - 40; // Adjusted width to leave some margin
-        const imgHeight = imgWidth * 1.5 - 40; // Adjusted height to maintain aspect ratio and leave margin
-        const imgX = (595.28 - imgWidth) / 2;
-        const imgY = (841.89 - imgHeight) / 2;
-
-        // Hide the loader when the PDF is ready
-        hideLoader();
-        // Add the image to the PDF
-        pdf.addImage(imgData, "PNG", imgX, imgY, imgWidth, imgHeight);
-        pdf.setTextColor(255, 255, 255);
-        // Calculate the position to place the text at the bottom
-        const textX = 40;
-        const textY = 841.89 - 2; // 20 points from the bottom
-
-        // If a table exists within the ck-editor__editable div, capture its text content
-        if (table) {
-          const tableText = table.textContent || "";
-
-          // Add the table text as text (preserve original formatting)
-          pdf.setFontSize(2); // Adjust the font size as needed
-          pdf.text(textX, textY, tableText);
-        }
-
-        // If the ck-editor__editable div contains paragraphs, capture the text from the first paragraph
-        const paragraphs = data.querySelectorAll("p");
-        paragraphs.forEach((paragraph) => {
-          const paragraphText = paragraph.textContent || "";
-
-          // Add each paragraph text as text (preserve original formatting)
-          pdf.setFontSize(2); // Adjust the font size as needed
-          pdf.text(textX, textY - 2, paragraphText); // Place it above the table text
-        });
-
-        // Save the PDF
-        pdf.save(filename ? filename + ".pdf" : "download.pdf");
-
-        // Redirect to the previous page after a short delay
-        await delay(200);
-        window.location.reload(true);
-      });
-    }
+    })();
   }
 
   /////////////////////////////////// Downloading ECG pdf on the browser //////////////////////////////////////
 
-  GetEcgContentOnPDF() {
-    
+  GetEcgContentOnPDF = async () => {
     // Show the loader before starting the PDF generation
     this.showLoader();
-    // Creating the filename. 
     const filename = this.createFilename();
-    // Getting the data from the ckeditor.
     const data = document.getElementsByClassName("ck-editor__editable")[0];
-    const table = data.querySelector("table");
-    data.classList.add("ck-blurred");
-    data.classList.remove("ck-focused");
+    
+    // Getting the logo and signature from the ck editor.
+    const images = data.querySelectorAll("img");
+    const signatureElement = images[1];
+    const signatureUrl = signatureElement ? signatureElement.src : null;
+    const logoElement = images[0];
+    const logoUrl = logoElement ? logoElement.src : null;
+    console.log("This is the signature Url:", signatureUrl);
+    console.log("This is the logo Url:", logoUrl);
 
     const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-    // Create a function to load images and render PDF
-    const loadImageAndRenderPDF = async () => {
-      try {
-        let graphSrc = Array.from(data.children).pop().children[0].currentSrc;
-        let graphElement = document.querySelector(
-          "figure.image:nth-last-of-type(1)"
-        );
-        graphElement.remove();
+    // Getting the data from the url params:
+    const { patientId, patientName, age, gender, testDate, reportDate, location, accession, reportImageUrl } = this.extractDataFromURL();
 
-        if (data != undefined) {
-          var a4Width = 595.28; // A4 width in points (1 point = 1/72 inch)
-          var a4Height = 841.89; // A4 height in points
+    // Logic for creating the pdf.
+    const pdf = new jsPDF("p", "pt", "a4");// adding the landscape orientation.
 
-          var canvasWidth = a4Width; // Adjusted width to leave some margin
-          var canvasHeight = a4Height; // Adjusted height to maintain aspect ratio and leave margin
+    // Here i will add the logic to add the image on a separate page.
+    let currentYPosition = 0;
+    currentYPosition = await this.addSeparateImageOnEcg(pdf, reportImageUrl, currentYPosition);
+    
 
-          const canvas = await html2canvas(data, {
-            scale: 2, // Adjust the scale if needed for better quality
-            useCORS: true, // Enable CORS to capture images from external URLs
-          });
+    // This is the logic to add the data on the page.
+    pdf.addPage();// switching back to portrait.
+    // setting the current y position back to 40.
+    currentYPosition = 40;
 
-          const imgData = canvas.toDataURL("image/png", 1.0);
-          const pdf = new jsPDF("p", "pt", [a4Width, a4Height], true);
+    try{
+      currentYPosition = await this.addLogo(pdf, logoUrl, currentYPosition);
 
-          // Calculate the image dimensions to fit within the PDF dimensions
-          const canvasAspectRatio = canvas.width / canvas.height;
-          const pdfAspectRatio = a4Width / a4Height;
+      const tableData = [
+        ["Patient Name:", patientName || "N/A", "Patient ID:", patientId || "N/A"],
+        ["Patient Age:", age || "N/A", "Patient Gender:", gender || "N/A"],
+        ["Test Date:", testDate || "N/A", "Report Date:", reportDate || "N/A"]
+      ];
 
-          let pdfImageWidth = canvasWidth;
-          let pdfImageHeight = canvasHeight;
+      currentYPosition += 20;
+      pdf.autoTable({
+        startY: currentYPosition,
+        body: tableData,
+        theme: 'grid',
+        styles: {
+            cellPadding: 3, 
+            fontSize: 10,
+        },
+      });
 
-          if (canvasAspectRatio > pdfAspectRatio) {
-            pdfImageWidth = canvasWidth;
-            pdfImageHeight = canvasWidth / canvasAspectRatio;
-          } else {
-            pdfImageHeight = canvasHeight;
-            pdfImageWidth = canvasHeight * canvasAspectRatio;
-          }
+      currentYPosition = pdf.previousAutoTable.finalY + 20;
 
-          // Calculate the positioning to center the image
-          const xPosition = (pdf.internal.pageSize.width - pdfImageWidth) / 2;
-          const yPosition = (pdf.internal.pageSize.height - pdfImageHeight) / 2;
+      // Adding the data of paragraphs of the ckeditor.
+      const paragraphs = data.querySelectorAll("p");
+      const marginX = 40; // Margin from the left side.
+      console.log("This is the complete fetched paragraph tag from ckeditor:");
+      console.log(paragraphs);
+      console.log("End of the paragraphs tag.");
 
-          // Create a separate canvas for the rotated graph image
-          const graphCanvas = document.createElement("canvas");
-          graphCanvas.width = 1024;
-          graphCanvas.height = 1024;
-          const graphCtx = graphCanvas.getContext("2d");
-          let graphImg = await this.getDataUri(graphSrc);
-          const image = new Image();
-          image.src = graphImg;
+      for (const paragraph of paragraphs) {
+        const paragraphText = paragraph.textContent || "";
+        console.log("This is the paragraph text :", paragraphText);
 
-          await new Promise((resolve) => {
-            image.onload = resolve;
-          });
+        pdf.setFontSize(13);
+        pdf.setFont("helvetica", "bold");
 
-          graphCtx.translate(graphCanvas.width / 2, graphCanvas.height / 2);
-          graphCtx.rotate(Math.PI / 2); // Rotate the image by 90 degrees
-          graphCtx.drawImage(
-            image,
-            -graphCanvas.height / 2,
-            -graphCanvas.width / 2,
-            graphCanvas.height,
-            graphCanvas.width
-          );
-
-          pdf.addImage(
-            graphCanvas.toDataURL("image/png"),
-            "PNG",
-            0,
-            0,
-            a4Width,
-            a4Height
-          );
-
-          pdf.addPage("a4", "portrait"); // Add a new portrait-oriented page
-          pdf.addImage(
-            imgData,
-            "PNG",
-            xPosition,
-            yPosition,
-            pdfImageWidth,
-            pdfImageHeight
-          );
-
-          pdf.setTextColor(255, 255, 255);
-
-          // Calculate the position to place the text at the bottom
-          const textX = 40;
-          const textY = 841.89 - 2; // 20 points from the bottom
-
-          // If a table exists within the ck-editor__editable div, capture its text content
-          if (table) {
-            const tableText = table.textContent || "";
-
-            // Add the table text as text (preserve original formatting)
-            pdf.setFontSize(2); // Adjust the font size as needed
-            pdf.text(textX, textY, tableText);
-          }
-
-          // Iterate through all paragraphs in the ck-editor__editable div
-          const paragraphs = data.querySelectorAll("p");
-          paragraphs.forEach((paragraph) => {
-            const paragraphText = paragraph.textContent || "";
-
-            // Add each paragraph text as text (preserve original formatting)
-            pdf.setFontSize(2); // Adjust the font size as needed
-            pdf.text(textX, textY - 2, paragraphText); // Place it above the table text
-          });
-          // Hide the loader when the PDF is ready
-          this.hideLoader();
-          // Save the PDF
-          pdf.save(filename ? filename + ".pdf" : "download.pdf");
-
-          // Get the previous page URL
-          const previousPageURL = document.referrer;
-
-          // Redirect to the previous page after a short delay
-          await delay(500); // Adjust the delay as needed
-          window.location.replace(previousPageURL);
-
-          // Reload the current page after another delay
-          await delay(200); // Adjust the delay as needed
-          window.location.reload(true);
+        if (paragraphText.includes("ECG")) {
+          pdf.text(paragraphText, marginX, currentYPosition);
+          currentYPosition += 20;
+        } else if (paragraphText.includes("Observation:")) {
+          pdf.text(paragraphText, marginX, currentYPosition);
+          currentYPosition += 20;
+        } else{
+          pdf.setFontSize(11);
+          pdf.setFont("helvetica", "normal");
+          pdf.text(paragraphText, marginX, currentYPosition);
+          currentYPosition += 15;
         }
-      } catch (error) {
-        console.error("Error generating PDF:", error);
-      }
-    };
 
-    loadImageAndRenderPDF();
-  }
+      }
+
+      // Adding the signature on the page.
+      currentYPosition = await this.addECGSignature(pdf, signatureUrl, currentYPosition);
+
+      // To download the current pdf on the browser.
+      pdf.save(filename ? filename + ".pdf" : "download.pdf");
+
+      const currentURL = window.location.href;
+
+      setTimeout(() => {
+          window.location.href = document.referrer + "?nocache=" + Date.now();
+      }, 200);
+
+      window.addEventListener("popstate", () => {
+          if (window.location.href !== currentURL) {
+              setTimeout(() => {
+                  window.location.reload(true);
+              }, 200);
+          }
+      });
+    } catch (error) {
+        console.error("Error generating PDF :", error);
+        this.showNotification("Error generating PDF. Please try again.");
+    } finally {
+        this.hideLoader();
+    }
+  
+  };
 
   ////////////////////////////////////////////////////////////////////////// UPLOAD ECG PDF //////////////////////////////////////////////////////////////////////////
   // uploadEcgPDF = async () => {
@@ -1340,15 +1969,15 @@ class App extends Component {
     const { patientId, patientName, age, gender, testDate, reportDate, location, accession, reportImageUrl } = this.extractDataFromURL();
 
     // Logic for creating the pdf.
-    const pdf = new jsPDF("p", "pt", "a4");
+    const pdf = new jsPDF("p", "pt", "a4");// adding the landscape orientation.
 
     // Here i will add the logic to add the image on a separate page.
     let currentYPosition = 0;
-    currentYPosition = await this.addSeparateImage(pdf, reportImageUrl, currentYPosition);
+    currentYPosition = await this.addSeparateImageOnEcg(pdf, reportImageUrl, currentYPosition);
     
 
     // This is the logic to add the data on the page.
-    pdf.addPage();
+    pdf.addPage();// switching back to portrait.
     // setting the current y position back to 40.
     currentYPosition = 40;
 
@@ -1455,6 +2084,74 @@ class App extends Component {
     } finally {
         this.hideLoader();
     }
+  
+  };
+  //***************************************///////////////////// upload ECG pdf to database (END) ///////////////**********************************************/
+
+  ////////////////////////////////////////////////////////////////////////// UPLOAD XRAY PDF //////////////////////////////////////////////////////////////////////////
+  uploadXrayPDF() {
+    // const showLoader = () => {
+    //   console.log("Showing loader");
+    //   const loader = document.querySelector(".loader");
+    //   if (loader) {
+    //     loader.style.display = "block";
+    //   }
+    // };
+
+    // const hideLoader = () => {
+    //   console.log("Hiding loader");
+    //   const loader = document.querySelector(".loader");
+    //   if (loader) {
+    //     loader.style.display = "none";
+    //   }
+    // };
+
+    // const extractDataFromURL = () => {
+    //   const urlParams = new URLSearchParams(window.location.search);
+    //   const patientId = urlParams.get("data-patientid");
+    //   const patientName = urlParams.get("data-patientname");
+    //   const testDate = urlParams.get("data-testdate");
+    //   const reportDate = urlParams.get("data-reportdate");
+    //   const location = urlParams.get("data-location");
+
+    //   return { patientId, patientName, testDate, reportDate, location };
+    // };
+
+    // const showNotification = (message) => {
+    //   const notification = document.getElementById("notification");
+    //   const notificationText = document.getElementById("notification-text");
+
+    //   if (notification && notificationText) {
+    //     notificationText.innerText = message;
+    //     notification.style.display = "block";
+
+    //     // Hide the notification after 3 seconds (adjust the delay as needed)
+    //     setTimeout(() => {
+    //       notification.style.display = "none";
+    //     }, 1000);
+    //   }
+    // };
+
+    // const getCSRFToken = async () => {
+    //   try {
+    //     const response = await fetch("/get-csrf-token/");
+    //     const data = await response.json();
+    //     return data.csrf_token;
+    //   } catch (error) {
+    //     console.error("Error fetching CSRF token:", error);
+    //     throw error;
+    //   }
+    // };
+
+    // // Show the loader before starting the PDF generation
+    // showLoader();
+    // const filename = this.createFilename();
+    // const data = document.getElementsByClassName("ck-editor__editable")[0];
+    // const table = data.querySelector("table");
+    // data.classList.add("ck-blurred");
+    // data.classList.remove("ck-focused");
+    // const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
     // // Create a function to load images and render PDF
     // const loadImageAndRenderPDF = async () => {
     //   try {
@@ -1592,7 +2289,7 @@ class App extends Component {
     //       console.log("FormData:", formData);
 
     //       try {
-    //         const response = await axios.post("/upload_ecg_pdf/", formData, {
+    //         const response = await axios.post("/upload_xray_pdf/", formData, {
     //           headers: {
     //             "Content-Type": "multipart/form-data",
     //             "X-CSRFToken": csrfToken,
@@ -1604,7 +2301,7 @@ class App extends Component {
     //           response.data
     //         );
     //         // Hide the loader when the PDF is ready
-    //         this.hideLoader();
+    //         hideLoader();
     //         // Show the success notification
     //         showNotification("PDF successfully uploaded!");
     //       } catch (error) {
@@ -1612,8 +2309,6 @@ class App extends Component {
     //         // Show the error notification
     //         showNotification("Error uploading PDF. Please try again.");
     //       }
-
-    //       //alert("Report Uploaded successfully!");
 
     //       // Save the current URL before going back in the history
     //       const currentURL = window.location.href;
@@ -1642,259 +2337,299 @@ class App extends Component {
     // };
 
     // loadImageAndRenderPDF();
-  };
-  //***************************************///////////////////// upload ECG pdf to database (END) ///////////////**********************************************/
 
-  ////////////////////////////////////////////////////////////////////////// UPLOAD XRAY PDF //////////////////////////////////////////////////////////////////////////
-  uploadXrayPDF = async () => {
-    const showLoader = () => {
-      console.log("Showing loader");
-      const loader = document.querySelector(".loader");
-      if (loader) {
-        loader.style.display = "block";
-      }
-    };
-
-    const hideLoader = () => {
-      console.log("Hiding loader");
-      const loader = document.querySelector(".loader");
-      if (loader) {
-        loader.style.display = "none";
-      }
-    };
-
-    const extractDataFromURL = () => {
-      const urlParams = new URLSearchParams(window.location.search);
-      const patientId = urlParams.get("data-patientid");
-      const patientName = urlParams.get("data-patientname");
-      const testDate = urlParams.get("data-testdate");
-      const reportDate = urlParams.get("data-reportdate");
-      const location = urlParams.get("data-location");
-
-      return { patientId, patientName, testDate, reportDate, location };
-    };
-
-    const showNotification = (message) => {
-      const notification = document.getElementById("notification");
-      const notificationText = document.getElementById("notification-text");
-
-      if (notification && notificationText) {
-        notificationText.innerText = message;
-        notification.style.display = "block";
-
-        // Hide the notification after 3 seconds (adjust the delay as needed)
-        setTimeout(() => {
-          notification.style.display = "none";
-        }, 1000);
-      }
-    };
-
-    const getCSRFToken = async () => {
-      try {
-        const response = await fetch("/get-csrf-token/");
-        const data = await response.json();
-        return data.csrf_token;
-      } catch (error) {
-        console.error("Error fetching CSRF token:", error);
-        throw error;
-      }
-    };
-
-    // Show the loader before starting the PDF generation
-    showLoader();
+  (async () => {
+    this.showLoader();
     const filename = this.createFilename();
     const data = document.getElementsByClassName("ck-editor__editable")[0];
-    const table = data.querySelector("table");
-    data.classList.add("ck-blurred");
-    data.classList.remove("ck-focused");
-    const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    
+    const images = data.querySelectorAll("img");
+    const signatureElement = images[1];
+    const signatureUrl = signatureElement ? signatureElement.src : null;
+    const logoElement = images[0];
+    const logoUrl = logoElement ? logoElement.src : null;
+    console.log("This is the signature Url:", signatureUrl);
+    console.log("This is the logo Url:", logoUrl);
 
-    // Create a function to load images and render PDF
-    const loadImageAndRenderPDF = async () => {
-      try {
-        let graphSrc = Array.from(data.children).pop().children[0].currentSrc;
-        let graphElement = document.querySelector(
-          "figure.image:nth-last-of-type(1)"
-        );
-        graphElement.remove();
+    const { patientId, patientName, age, gender, testDate, reportDate, location, accession, reportImageUrl } = this.extractDataFromURL();
 
-        if (data != undefined) {
-          var a4Width = 595.28; // A4 width in points (1 point = 1/72 inch)
-          var a4Height = 841.89; // A4 height in points
+    const pdf = new jsPDF("p", "pt", "a4");
 
-          var canvasWidth = a4Width; // Adjusted width to leave some margin
-          var canvasHeight = a4Height; // Adjusted height to maintain aspect ratio and leave margin
+    // Here i will add the logic to add the image on a separate page.
+    let currentYPosition = 0;
+    currentYPosition = await this.addSeparateImageOnXray(pdf, reportImageUrl, currentYPosition);
+    
 
-          const canvas = await html2canvas(data, {
-            scale: 2, // Adjust the scale if needed for better quality
-            useCORS: true, // Enable CORS to capture images from external URLs
-          });
+    // This is the logic to add the data on the page.
+    pdf.addPage();// switching back to portrait.
+    // setting the current y position back to 40.
+    currentYPosition = 40;
 
-          const imgData = canvas.toDataURL("image/png", 1.0);
-          const pdf = new jsPDF("p", "pt", [a4Width, a4Height], true);
+    try {
+        currentYPosition = await this.addLogo(pdf, logoUrl, currentYPosition);
 
-          // Calculate the image dimensions to fit within the PDF dimensions
-          const canvasAspectRatio = canvas.width / canvas.height;
-          const pdfAspectRatio = a4Width / a4Height;
+        const tableData = [
+            ["Patient Name:", patientName || "N/A", "Patient ID:", patientId || "N/A"],
+            ["Patient Age:", age || "N/A", "Patient Gender:", gender || "N/A"],
+            ["Test Date:", testDate || "N/A", "Report Date:", reportDate || "N/A"]
+        ];
 
-          let pdfImageWidth = canvasWidth;
-          let pdfImageHeight = canvasHeight;
+        currentYPosition += 20;
 
-          if (canvasAspectRatio > pdfAspectRatio) {
-            pdfImageWidth = canvasWidth;
-            pdfImageHeight = canvasWidth / canvasAspectRatio;
-          } else {
-            pdfImageHeight = canvasHeight;
-            pdfImageWidth = canvasHeight * canvasAspectRatio;
-          }
+        pdf.autoTable({
+            startY: currentYPosition,
+            body: tableData,
+            theme: 'grid',
+            styles: {
+                cellPadding: 3,
+                fontSize: 10,
+            },
+        });
+        currentYPosition = pdf.previousAutoTable.finalY + 20;
 
-          // Calculate the positioning to center the image
-          const xPosition = (pdf.internal.pageSize.width - pdfImageWidth) / 2;
-          const yPosition = (pdf.internal.pageSize.height - pdfImageHeight) / 2;
+        const paragraphs = data.querySelectorAll("p");
+        const columnWidth = (pdf.internal.pageSize.width - 80) / 2; // 80 = 40px margin on each side
+        let isLeftColumn = true; // Start with left column
+        let leftColumnY = 0;
+        let rightColumnY = 0;
+        const marginX = 40; // Margin from left side
+        const columnGap = 10; // Gap between columns
+        const bullet = "\u2022 ";
+        // For fixing the ckeditor problem i am using this logic - Himanshu.
+        const observationArray = [];
+        console.log("This is the complete fetched paragraph tag from ckeditor:");
+        console.log(paragraphs)
+        console.log("End of the paragraphs tag.")
+        
 
-          // Create a separate canvas for the rotated graph image
-          const graphCanvas = document.createElement("canvas");
-          graphCanvas.width = 1024;
-          graphCanvas.height = 1024;
-          const graphCtx = graphCanvas.getContext("2d");
-          let graphImg = await this.getDataUri(graphSrc);
-          const image = new Image();
-          image.src = graphImg;
-
-          await new Promise((resolve) => {
-            image.onload = resolve;
-          });
-
-          graphCtx.translate(graphCanvas.width / 2, graphCanvas.height / 2);
-          graphCtx.rotate(Math.PI / 2); // Rotate the image by 90 degrees
-          graphCtx.drawImage(
-            image,
-            -graphCanvas.height / 2,
-            -graphCanvas.width / 2,
-            graphCanvas.height,
-            graphCanvas.width
-          );
-
-          pdf.addImage(
-            graphCanvas.toDataURL("image/png"),
-            "PNG",
-            0,
-            0,
-            a4Width,
-            a4Height
-          );
-
-          pdf.addPage("a4", "portrait"); // Add a new portrait-oriented page
-          pdf.addImage(
-            imgData,
-            "PNG",
-            xPosition,
-            yPosition,
-            pdfImageWidth,
-            pdfImageHeight
-          );
-
-          pdf.setTextColor(255, 255, 255);
-
-          // Calculate the position to place the text at the bottom
-          const textX = 40;
-          const textY = 841.89 - 2; // 20 points from the bottom
-
-          // If a table exists within the ck-editor__editable div, capture its text content
-          if (table) {
-            const tableText = table.textContent || "";
-
-            // Add the table text as text (preserve original formatting)
-            pdf.setFontSize(2); // Adjust the font size as needed
-            pdf.text(textX, textY, tableText);
-          }
-
-          // Iterate through all paragraphs in the ck-editor__editable div
-          const paragraphs = data.querySelectorAll("p");
-          paragraphs.forEach((paragraph) => {
+        for (const paragraph of paragraphs) {
             const paragraphText = paragraph.textContent || "";
+            console.log("These is the paragraph text :", paragraphText);
 
-            // Add each paragraph text as text (preserve original formatting)
-            pdf.setFontSize(2); // Adjust the font size as needed
-            pdf.text(textX, textY - 2, paragraphText); // Place it above the table text
-          });
+            pdf.setFontSize(12);
+            pdf.setFont("helvetica", "bold");
 
-          // Convert the PDF to a Blob
-          const pdfBlob = pdf.output("blob");
+            if (paragraphText.includes("OBSERVATIONS:")) {
+                pdf.text(paragraphText, marginX, currentYPosition);
+                pdf.setFontSize(13);
+                pdf.setFont("helvetica", "normal");
+                currentYPosition += 20;
+            } else if (paragraphText.includes("IMPRESSION:")) {
+                // Adding the logic if the lines are lesser than 6 than they will get printed in the normal manner.
+                if (observationArray.length > 5){
+                  // Adding the logic to add the observation lines just before the Impression line.
+                  // setting the font size and the font family back to normal.
+                  pdf.setFontSize(12); 
+                  pdf.setFont("helvetica", "normal");
+                  const totallines = observationArray.length;
+                  const halflines = Math.ceil(totallines / 2);
+                  console.log("This is the observation array :", observationArray);
 
-          // Extract data from URL
-          const { patientId, patientName, testDate, reportDate, location } =
-            extractDataFromURL();
+                  // Adding the bullet point to the lines before printing them  on the pdf.
+                  const addBulletPoint = (line) => {
+                    if (line.startsWith(bullet)) {
+                        return line;
+                    }
+                    return bullet + line;
+                  };
 
-          // Send the FormData to Django backend using fetch
-          const csrfToken = await getCSRFToken();
-          console.log("CSRF Token:", csrfToken);
+                  // setting the left column and right column logic (left one is not needed, i can optimise it later.)
+                  rightColumnY = currentYPosition;
+                  leftColumnY = currentYPosition;
 
-          // Create FormData and append the PDF Blob
-          const formData = new FormData();
-          formData.append(
-            "pdf",
-            pdfBlob,
-            filename ? filename + ".pdf" : "download.pdf"
-          );
-          formData.append("patientId", patientId);
-          formData.append("patientName", patientName);
-          formData.append("testDate", testDate);
-          formData.append("reportDate", reportDate);
-          formData.append("location", location);
+                  // Processing the texts which will fix the line text width greater than the column width issue.
+                  const processTextColumn = (text, x, y, columnWidth) => {
+                    let currentY = y;
+                    const textWidth = pdf.getTextWidth(text);
+                    const maxWidth = columnWidth - 20; // Padding for each column
+                    console.log("This is the current y (at the beginning of processing the new line of array ) :", currentY);
+                    console.log("This is the textWidth :", textWidth);
+                    console.log("This is the maxwidth :", maxWidth);
+            
+                    if (textWidth > maxWidth) {
+                      let remainingText = text;
+                      pdf.setFont("helvetica", "normal");
+                      let currentLine = '';
+                  
+                      // Split text into words
+                      const words = remainingText.split(' ');
+                  
+                      for (const word of words) {
+                          // Construct a test line with the next word
+                          const testLine = currentLine.length > 0 ? currentLine + ' ' + word : word;
+                          console.log("This is the testline :", testLine);
+                          const testLineWidth = pdf.getTextWidth(testLine);
+                  
+                          if (testLineWidth > maxWidth) {
+                              // If it exceeds the width, print the current line
+                              if (currentLine.length > 0) {
+                                  console.log("if the current line is greater than the maxwidth and is having some data:");
+                                  console.log("This is the current line", currentLine);
+                                  pdf.text(currentLine, x, currentY);
+                                  currentY += 15; // Move down for the next line
+                                  console.log("This is the current y :", currentY);
+                              }
+                              // Start a new line with the current word
+                              currentLine = "  " + word; // Reset current line to the word that caused overflow
+                              console.log("This is the remaining word or sentence added with a space here :", currentLine);
+                              
+                          } else {
+                              // If it fits, update the current line
+                              currentLine = testLine;
+                          }
+                      }
+                  
+                      // Print any remaining text in currentLine
+                      if (currentLine.length > 0) {
+                          pdf.text(currentLine, x, currentY);
+                          console.log("Printing any current line if left :", currentLine);
+                          console.log("This is the current y updated on the remaining text code :", currentY);
+                      }
+                    } else {
+                        pdf.text(text, x, currentY);
+                        console.log("Adding the text directly because it doesn't need separation :", text);
+                        console.log("the current y for directly added text:", currentY);
+                    }
 
-          console.log("FormData:", formData);
+                    console.log("This is the current Y before just coming out of the process (return currenty +15) :", currentY);
+                    
+                    return currentY + 15;
+                  
+                  };
 
-          try {
-            const response = await axios.post("/upload_xray_pdf/", formData, {
-              headers: {
-                "Content-Type": "multipart/form-data",
-                "X-CSRFToken": csrfToken,
-              },
+                  // Adding the lines to the respective side along with the bullet points. 
+                  for (let i = 0; i < totallines; i++) {
+                    const lineWithBullet = addBulletPoint(observationArray[i]);
+                    console.log("These are the observation array lines given one by one :");
+                    console.log(lineWithBullet);
+                    console.log("End of the observation array separated lines.");
+                    if (i < halflines) {
+                        leftColumnY = processTextColumn(lineWithBullet, marginX, leftColumnY, columnWidth);
+                    } else {
+                        rightColumnY = processTextColumn(lineWithBullet, marginX + columnWidth + columnGap, rightColumnY, columnWidth);
+                    }
+                  }
+                  currentYPosition = Math.max(leftColumnY, rightColumnY);
+                  console.log("This is the right Column y :", rightColumnY);
+                  console.log("This is the left column y :", leftColumnY);
+                  console.log("This is the current y position :", currentYPosition);
+                } else {
+
+                  // Adding the bullet point.
+                  const addBulletPoint = (line) => {
+                    if (line.startsWith(bullet)) {
+                        return line;
+                    }
+                    return bullet + line;
+                  };
+
+                  // Now adding the texts in normal manner.
+                  for (const line of observationArray){
+                    const lineWithBullet = addBulletPoint(line);
+                    pdf.text(lineWithBullet, marginX, currentYPosition);
+                    currentYPosition += 15;
+                  }
+
+                }
+                
+                // End of the observation text's logic.
+                currentYPosition += 20;
+                pdf.setFontSize(13);
+                pdf.setFont("helvetica", "bold");
+                pdf.text(paragraphText, marginX, currentYPosition);
+                pdf.setFontSize(10);
+                pdf.setFont("helvetica", "normal");
+                currentYPosition += 20;
+            } else if (paragraphText.includes("Dr.")) {
+                currentYPosition = await this.addSignature(pdf, signatureUrl, currentYPosition);
+                pdf.setFontSize(12);
+                pdf.setFont("helvetica", "normal");
+                const drdatalines = paragraphText.split(',').map(line => line.trim()).filter(line => line.length > 0);
+                for (const drdata of drdatalines){
+                  pdf.text(drdata, marginX, currentYPosition);
+                  currentYPosition += 15;
+                }
+                currentYPosition += 10;
+            } else if (paragraphText.includes("X-RAY")) {
+                pdf.setFontSize(13);
+                pdf.setFont("helvetica", "bold");
+                pdf.text(paragraphText, marginX, currentYPosition);
+                currentYPosition += 20;
+            } else if (paragraphText.includes(bullet)) {
+                pdf.setFontSize(12);
+                pdf.setFont("helvetica", "bold");
+                const impressionlines = paragraphText.split('.').map(line => line.trim()).filter(line => line.length > 0);
+                for (const line of impressionlines) {
+                  pdf.text(line, marginX, currentYPosition);
+                }
+                currentYPosition += 20;
+            } else {
+              // Handle text in columnar structure
+              const lines = paragraphText.split('.').map(line => line.trim()).filter(line => line.length > 0);
+              console.log("These are the lines of the observation :")
+              console.log(lines)
+              console.log("End of lines of the observation.")
+              // Adding the observation text in the array. 
+              for (const observationtext of lines){
+                observationArray.push(observationtext);
+              }
+              // End of the observation text logic.
+              
+          }
+        }              
+
+        
+        const pdfBlob = pdf.output("blob");
+
+        try {
+            const csrfToken = await this.getCSRFToken();
+            const formData = new FormData();
+            formData.append("pdf", pdfBlob, filename ? filename + ".pdf" : "download.pdf");
+            formData.append("patientId", patientId);
+            formData.append("patientName", patientName);
+            formData.append("age", age);
+            formData.append("gender", gender);
+            formData.append("testDate", testDate);
+            formData.append("reportDate", reportDate);
+            formData.append("location", location);
+            formData.append("accession", accession);
+
+            await axios.post("/upload_xray_pdf/", formData, {
+                headers: {
+                    "Content-Type": "multipart/form-data",
+                    "X-CSRFToken": csrfToken,
+                },
             });
 
-            console.log(
-              "PDF successfully sent to Django backend.",
-              response.data
-            );
-            // Hide the loader when the PDF is ready
-            hideLoader();
-            // Show the success notification
-            showNotification("PDF successfully uploaded!");
-          } catch (error) {
+            console.log("PDF successfully sent to Django backend.");
+            this.showNotification("PDF successfully uploaded!");
+        } catch (error) {
             console.error("Error sending PDF to Django backend.", error);
-            // Show the error notification
-            showNotification("Error uploading PDF. Please try again.");
-          }
-
-          // Save the current URL before going back in the history
-          const currentURL = window.location.href;
-
-          // Redirect to the previous page after a short delay
-          await delay(200);
-
-          // Navigate back to the previous page with a cache-busting query parameter
-          window.location.href = document.referrer + "?nocache=" + Date.now();
-
-          // Listen for the popstate event to know when the history state changes
-          window.addEventListener("popstate", () => {
-            // Check if the URL has changed
-            if (window.location.href !== currentURL) {
-              // Reload the current page after a short delay
-              setTimeout(() => {
-                window.location.reload(true);
-              }, 200);
-            }
-          });
+            this.showNotification("Error uploading PDF. Please try again.");
         }
-      } catch (error) {
-        console.error("Error generating PDF:", error);
-        // Hide the loader when the PDF is ready
-      }
-    };
 
-    loadImageAndRenderPDF();
-  };
+        const currentURL = window.location.href;
+
+        setTimeout(() => {
+            window.location.href = document.referrer + "?nocache=" + Date.now();
+        }, 200);
+
+        window.addEventListener("popstate", () => {
+            if (window.location.href !== currentURL) {
+                setTimeout(() => {
+                    window.location.reload(true);
+                }, 200);
+            }
+        });
+
+    } catch (error) {
+        console.error("Error generating PDF:", error);
+        this.showNotification("Error generating PDF. Please try again.");
+    } finally {
+        this.hideLoader();
+    }
+  })();
+  }
   //***************************************///////////////////// upload split XRAY pdf to database (END) ///////////////**********************************************/
 
   ////////////////////////////////// Upload XRAY PDF without IMAGE (START) ////////////////////////
@@ -2167,6 +2902,8 @@ class App extends Component {
                   pdf.setFont("helvetica", "normal");
                   currentYPosition += 20;
               } else if (paragraphText.includes("IMPRESSION:")) {
+                  // Adding the logic if the lines are lesser than 6 than they will get printed in the normal manner.
+                  if (observationArray.length > 5){
                   // Adding the logic to add the observation lines just before the Impression line.
                   // setting the font size and the font family back to normal.
                   pdf.setFontSize(12); 
@@ -2263,14 +3000,33 @@ class App extends Component {
                   console.log("This is the right Column y :", rightColumnY);
                   console.log("This is the left column y :", leftColumnY);
                   console.log("This is the current y position :", currentYPosition);
-                  // End of the observation text's logic.
-                  currentYPosition += 20;
-                  pdf.setFontSize(13);
-                  pdf.setFont("helvetica", "bold");
-                  pdf.text(paragraphText, marginX, currentYPosition);
-                  pdf.setFontSize(10);
-                  pdf.setFont("helvetica", "normal");
-                  currentYPosition += 20;
+                } else {
+
+                  // Adding the bullet point.
+                  const addBulletPoint = (line) => {
+                    if (line.startsWith(bullet)) {
+                        return line;
+                    }
+                    return bullet + line;
+                  };
+
+                  // Now adding the texts in normal manner.
+                  for (const line of observationArray){
+                    const lineWithBullet = addBulletPoint(line);
+                    pdf.text(lineWithBullet, marginX, currentYPosition);
+                    currentYPosition += 15;
+                  }
+
+                }
+                
+                // End of the observation text's logic.
+                currentYPosition += 20;
+                pdf.setFontSize(13);
+                pdf.setFont("helvetica", "bold");
+                pdf.text(paragraphText, marginX, currentYPosition);
+                pdf.setFontSize(10);
+                pdf.setFont("helvetica", "normal");
+                currentYPosition += 20;
               } else if (paragraphText.includes("Dr.")) {
                   currentYPosition = await this.addSignature(pdf, signatureUrl, currentYPosition);
                   pdf.setFontSize(12);
@@ -2359,7 +3115,7 @@ class App extends Component {
           this.hideLoader();
       }
   })();
-} 
+}
 
 
 // UploadDivContentOnPDFWithoutImage = function() {
@@ -2713,162 +3469,9 @@ class App extends Component {
   // }
   
   UploadDivContentOnPDF() {
-    const showLoader = () => {
-        console.log("Showing loader");
-        const loader = document.querySelector(".loader");
-        if (loader) {
-            loader.style.display = "block";
-        }
-    };
-
-    const hideLoader = () => {
-        console.log("Hiding loader");
-        const loader = document.querySelector(".loader");
-        if (loader) {
-            loader.style.display = "none";
-        }
-    };
-
-    const extractDataFromURL = () => {
-        const urlParams = new URLSearchParams(window.location.search);
-        const patientId = urlParams.get("data-patientid");
-        const patientName = urlParams.get("data-patientname");
-        const age = urlParams.get("data-age");
-        const gender = urlParams.get("data-gender");
-        const testDate = urlParams.get("data-testdate");
-        const reportDate = urlParams.get("data-reportdate");
-        const location = urlParams.get("data-location");
-        const accession = urlParams.get("data-accession");
-        const reportImageUrl = urlParams.get("data-reportimage");
-
-        return { patientId, patientName, age, gender, testDate, reportDate, location, accession, reportImageUrl };
-    };
-
-    const showNotification = (message) => {
-        const notification = document.getElementById("notification");
-        const notificationText = document.getElementById("notification-text");
-
-        if (notification && notificationText) {
-            notificationText.innerText = message;
-            notification.style.display = "block";
-
-            setTimeout(() => {
-                notification.style.display = "none";
-            }, 1500);
-        }
-    };
-
-    const getCSRFToken = async () => {
-        try {
-            const response = await fetch("/get-csrf-token/");
-            const data = await response.json();
-            return data.csrf_token;
-        } catch (error) {
-            console.error("Error fetching CSRF token:", error);
-            throw error;
-        }
-    };
-
-    const fetchImageAsBase64 = async (imageUrl) => {
-        try {
-            const response = await fetch(imageUrl);
-            const blob = await response.blob();
-            const reader = new FileReader();
-            return new Promise((resolve, reject) => {
-                reader.onloadend = () => resolve(reader.result);
-                reader.onerror = reject;
-                reader.readAsDataURL(blob);
-            });
-        } catch (error) {
-            console.error("Error fetching image:", error);
-            throw error;
-        }
-    };
-
-    const addLogo = async (pdf, logoUrl, currentYPosition) => {
-        if (logoUrl) {
-            try {
-                const imageData = await fetchImageAsBase64(logoUrl);
-                const pageWidth = pdf.internal.pageSize.width;
-                const imgWidth = pageWidth - 80;
-                const imgHeight = 50;
-                const imgX = 40;
-                const imgY = currentYPosition;
-
-                pdf.addImage(imageData, "PNG", imgX, imgY, imgWidth, imgHeight);
-                currentYPosition = imgY + imgHeight + 20;
-                return currentYPosition;
-            } catch (error) {
-                console.log("Error adding logo image to PDF:", error);
-                throw error;
-            }
-        }
-        return currentYPosition;
-    };
-
-    const addSignature = async (pdf, signatureUrl, currentYPosition) => {
-        if (signatureUrl) {
-            try {
-                const imageData = await fetchImageAsBase64(signatureUrl);
-                const pageWidth = pdf.internal.pageSize.width;
-                const imgWidth = pageWidth - 80;
-                const imgHeight = 40;
-                const imgX = 40;
-                const imgY = currentYPosition ;
-
-                pdf.addImage(imageData, "PNG", imgX, imgY, imgWidth, imgHeight);
-                currentYPosition = imgY + imgHeight + 20;
-                return currentYPosition;
-            } catch (error) {
-                console.log("Error adding signature image to PDF:", error);
-                throw error;
-            }
-        }
-        return currentYPosition;
-    };
-
-    const addReportImage = async (pdf, reportImageUrl, currentYPosition) => {
-        const A4_HEIGHT = 841.89; // A4 height in points (for "pt" unit used in jsPDF)
-    
-        if (reportImageUrl) {
-            try {
-                const imageData = await fetchImageAsBase64(reportImageUrl);
-                const pageWidth = pdf.internal.pageSize.width;
-                const imgWidth = 300;
-                const imgHeight = 200;
-                const imgX = (pageWidth - imgWidth) / 2;
-                const imgY = currentYPosition;
-    
-                // Calculate the new Y position after adding the image
-                const newYPosition = imgY + imgHeight + 20;
-    
-                // Check if the new Y position exceeds the A4 page height
-                if (newYPosition > A4_HEIGHT) {
-                    // Add a new page to the PDF
-                    pdf.addPage();
-                    // Reset currentYPosition for the new page
-                    currentYPosition = 40; // Start at a margin from the top of the new page
-                }
-    
-                // Add the image
-                pdf.addImage(imageData, "PNG", imgX, currentYPosition, imgWidth, imgHeight);
-    
-                // Update currentYPosition for the next content
-                currentYPosition = imgY + imgHeight + 20; // Update the position for the next content
-                return currentYPosition;
-            } catch (error) {
-                console.error("Error adding image to PDF:", error);
-                hideLoader();
-                showNotification("Error processing image. Please try again.");
-                throw error;
-            }
-        }
-        return currentYPosition;
-    };
-  
 
     (async () => {
-        showLoader();
+        this.showLoader();
         const filename = this.createFilename();
         const data = document.getElementsByClassName("ck-editor__editable")[0];
         
@@ -2887,7 +3490,7 @@ class App extends Component {
         let currentYPosition = 40;
 
         try {
-            currentYPosition = await addLogo(pdf, logoUrl, currentYPosition);
+            currentYPosition = await this.addLogo(pdf, logoUrl, currentYPosition);
 
             const tableData = [
                 ["Patient Name:", patientName || "N/A", "Patient ID:", patientId || "N/A"],
@@ -3062,7 +3665,7 @@ class App extends Component {
                     pdf.setFont("helvetica", "normal");
                     currentYPosition += 20;
                 } else if (paragraphText.includes("Dr.")) {
-                    currentYPosition = await addSignature(pdf, signatureUrl, currentYPosition);
+                    currentYPosition = await this.addSignature(pdf, signatureUrl, currentYPosition);
                     pdf.setFontSize(12);
                     pdf.setFont("helvetica", "normal");
                     const drdatalines = paragraphText.split(',').map(line => line.trim()).filter(line => line.length > 0);
@@ -3099,12 +3702,12 @@ class App extends Component {
               }
             }              
 
-            currentYPosition = await addReportImage(pdf, reportImageUrl, currentYPosition);
+            currentYPosition = await this.addReportImage(pdf, reportImageUrl, currentYPosition);
 
             const pdfBlob = pdf.output("blob");
 
             try {
-                const csrfToken = await getCSRFToken();
+                const csrfToken = await this.getCSRFToken();
                 const formData = new FormData();
                 formData.append("pdf", pdfBlob, filename ? filename + ".pdf" : "download.pdf");
                 formData.append("patientId", patientId);
@@ -3124,10 +3727,10 @@ class App extends Component {
                 });
 
                 console.log("PDF successfully sent to Django backend.");
-                showNotification("PDF successfully uploaded!");
+                this.showNotification("PDF successfully uploaded!");
             } catch (error) {
                 console.error("Error sending PDF to Django backend.", error);
-                showNotification("Error uploading PDF. Please try again.");
+                this.showNotification("Error uploading PDF. Please try again.");
             }
 
             const currentURL = window.location.href;
@@ -3146,9 +3749,9 @@ class App extends Component {
 
         } catch (error) {
             console.error("Error generating PDF:", error);
-            showNotification("Error generating PDF. Please try again.");
+            this.showNotification("Error generating PDF. Please try again.");
         } finally {
-            hideLoader();
+            this.hideLoader();
         }
     })();
 }
