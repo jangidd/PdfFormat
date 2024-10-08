@@ -2357,7 +2357,11 @@ class App extends Component {
 
     // Here i will add the logic to add the image on a separate page.
     let currentYPosition = 0;
+    // If i want to add the logo on the first page also.
+    currentYPosition = await this.addLogo(pdf, logoUrl, currentYPosition);
+    currentYPosition = 0;
     currentYPosition = await this.addSeparateImageOnXray(pdf, reportImageUrl, currentYPosition);
+    
     
 
     // This is the logic to add the data on the page.
