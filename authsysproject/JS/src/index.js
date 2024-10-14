@@ -684,7 +684,7 @@ class App extends Component {
 
     if (reportImageUrl) {
         try {
-            const imageData = await fetchImageAsBase64(reportImageUrl);
+            const imageData = await this.fetchImageAsBase64(reportImageUrl);
             const pageWidth = pdf.internal.pageSize.width;
             const imgWidth = 300;
             const imgHeight = 200;
@@ -710,8 +710,8 @@ class App extends Component {
             return currentYPosition;
         } catch (error) {
             console.error("Error adding image to PDF:", error);
-            hideLoader();
-            showNotification("Error processing image. Please try again.");
+            this.hideLoader();
+            this.showNotification("Error processing image. Please try again.");
             throw error;
         }
     }
@@ -2356,7 +2356,7 @@ class App extends Component {
     const pdf = new jsPDF("p", "pt", "a4");
 
     // Here i will add the logic to add the image on a separate page.
-    let currentYPosition = 0;
+    let currentYPosition = 40;
     // If i want to add the logo on the first page also.
     currentYPosition = await this.addLogo(pdf, logoUrl, currentYPosition);
     currentYPosition = 0;
@@ -3487,7 +3487,7 @@ class App extends Component {
         console.log("This is the signature Url:", signatureUrl);
         console.log("This is the logo Url:", logoUrl);
 
-        const { patientId, patientName, age, gender, testDate, reportDate, location, accession, reportImageUrl } = extractDataFromURL();
+        const { patientId, patientName, age, gender, testDate, reportDate, location, accession, reportImageUrl } = this.extractDataFromURL();
 
         const pdf = new jsPDF("p", "pt", "a4");
 
